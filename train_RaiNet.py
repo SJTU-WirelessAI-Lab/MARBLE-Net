@@ -187,27 +187,19 @@ def visualize_beam_patterns(model, fm_list, Nt, d, save_dir, tag):
         plt.close()
         print(f"Coverage map ({f_label}) saved to {cov_path}")
 
-def initial_rainbow_beam_ULA_YOLO(N, d, BW, f_scs, fm_list, phi_1, phi_M):
-    device, dtype, c = fm_list.device, fm_list.dtype, 3e8
-    antenna_idx = torch.arange(N, dtype=dtype, device=device) - (N - 1) / 2
-    PS = -fm_list[0] * antenna_idx * d * torch.sin(torch.deg2rad(torch.tensor(phi_1, device=device, dtype=dtype))) / c
-    TTD = -PS / BW - ((fm_list[0] + BW) * antenna_idx * d * torch.sin(torch.deg2rad(torch.tensor(phi_M, device=device, dtype=dtype)))) / (BW * c)
-    PS, TTD = 2.0 * torch.pi * PS, 1e9 * TTD
-    PS, TTD = torch.fmod(PS, 2*torch.pi), torch.fmod(TTD, 1e9/f_scs)
-    return PS, TTD
+def loss_ann(pos_est, x_gt, y_gt, phi_gt, r_gt):
+    """Localization loss: MSE in Cartesian space + auxiliary polar error stats."""
+    x_est, y_est = pos_est[:, 0], pos_est[:, 1]
+    dist_sq_error = (x_est - x_gt) ** 2 + (y_est - y_gt) ** 2
+    total_loss = torch.mean(dist_sq_error)
+    dist_sq_error_sum = torch.sum(dist_sq_error)
 
-def compute_uplink_signal_torch(H_oneway, PS_expanded, TTD_expanded, fm_list):
-    device, dtype = H_oneway.device, H_oneway.dtype
-    B, Nt, num_subcarriers = H_oneway.shape
-    ps_b = PS_expanded.unsqueeze(1)      # -> [B, 1, Nt]
-    ttd_b = TTD_expanded.unsqueeze(1)    # -> [B, 1, Nt]
-    fm_b = fm_list.view(1, -1, 1)        # -> [1, num_subcarriers, 1]
-    phase = -(ps_b + 2 * np.pi * (fm_b - fm_list[0]) * ttd_b)
-    normalization_factor = 1.0 / torch.sqrt(torch.tensor(Nt, dtype=torch.float32, device=device))
-    w_matrix = torch.exp(1j * phase).to(device=device, dtype=dtype) * normalization_factor
-    H_transposed = H_oneway.transpose(1, 2) # -> [B, num_subcarriers, Nt]
-    uplink_signal = torch.einsum('bmn,bmn->bm', w_matrix.conj(), H_transposed)
-    return uplink_signal
+    r_est = torch.sqrt(x_est**2 + y_est**2)
+    phi_est = torch.rad2deg(torch.atan2(y_est, x_est))
+    phi_sq_error_sum = torch.sum((phi_est - phi_gt) ** 2)
+    r_sq_error_sum = torch.sum((r_est - r_gt) ** 2)
+
+    return total_loss, dist_sq_error_sum, phi_sq_error_sum, r_sq_error_sum
 
 # =======================================================
 # 2) Network model definitions
@@ -502,36 +494,6 @@ def analyze_param_change(model, prev_params, stage_name):
     
     return {'PS': current_ps.copy(), 'TTD': current_ttd.copy()}
 
-
-    dis_str = str(int(dis_max))
-    filename_suffix = f"{args.training_mode}_{args.wall_type}_{dis_str}"
-
-    plt.figure(figsize=(8, 8))
-    plt.scatter(all_r_gt, all_r_est, alpha=0.5, s=10)
-    min_val, max_val = min(min(all_r_gt), min(all_r_est)), max(max(all_r_gt), max(all_r_est))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
-    plt.title(f'Range Estimation ({args.training_mode.capitalize()} - {args.wall_type}) RMSE: {test_r_rmse:.4f} m')
-    plt.xlabel('Ground Truth Range (m)'); plt.ylabel('Predicted Range (m)')
-    plt.grid(True); plt.legend(); plt.axis('equal'); plt.tight_layout()
-    range_fig_path = os.path.join(args.figure_dir, 'range', f'range_scatter_{filename_suffix}.png')
-    plt.savefig(range_fig_path, dpi=300)
-    print(f"Range scatter plot saved to: {range_fig_path}")
-    plt.close()
-
-    plt.figure(figsize=(8, 8))
-    plt.scatter(all_phi_gt, all_phi_est, alpha=0.5, s=10)
-    min_val, max_val = min(min(all_phi_gt), min(all_phi_est)), max(max(all_phi_gt), max(all_phi_est))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal (y=x)')
-    plt.title(f'Angle Estimation ({args.training_mode.capitalize()} - {args.wall_type}) RMSE: {test_phi_rmse:.4f}°')
-    plt.xlabel('Ground Truth Angle (°)'); plt.ylabel('Predicted Angle (°)')
-    plt.grid(True); plt.legend(); plt.axis('equal'); plt.tight_layout()
-    angle_fig_path = os.path.join(args.figure_dir, 'angle', f'angle_scatter_{filename_suffix}.png')
-    plt.savefig(angle_fig_path, dpi=300)
-    print(f"Angle scatter plot saved to: {angle_fig_path}")
-    plt.close()
-
-
-
 def recalibrate_bn(model, loader, device, fm_list, pt_scaling_factor, noise_std_dev, model1_frozen=None):
     """
     Run a forward pass over a portion of data to update BatchNorm running_mean and running_var.
@@ -747,7 +709,7 @@ def main():
             # Evaluate baseline performance
             best_base_path2 = os.path.join(args.output_dir, f'best_model2_{session_baseline}_{args.wall_type}_{dis_str}.pt')
             if os.path.exists(best_base_path2):
-                model2.load_state_dict(torch.load(best_base_path2, map_location=device))
+                model2.load_state_dict(torch.load(best_base_path2, map_location=device, weights_only=True))
             
             print(f"\n>>> [Baseline complete] Baseline performance with fixed initial beam:")
             evaluate_and_plot(model1, model2, test_loader, device, fm_list, pt_scaling_factor, noise_std_dev, dis_max, args, final_session_name=session_baseline)
@@ -779,12 +741,12 @@ def main():
                 print(f">>> [Resume] Found that Cycle {cycle_num} is already completed (Found {os.path.basename(resume_model2_path)}).")
                 print(">>> [Resume] Loading models and skipping this cycle...")
                 try:
-                    state_dict2 = torch.load(resume_model2_path, map_location=device)
+                    state_dict2 = torch.load(resume_model2_path, map_location=device, weights_only=True)
                     model2.load_state_dict(state_dict2)
                     
                     # Try loading Model 1
                     if os.path.exists(resume_model1_path):
-                        state_dict1 = torch.load(resume_model1_path, map_location=device)
+                        state_dict1 = torch.load(resume_model1_path, map_location=device, weights_only=True)
                         model1.load_state_dict(state_dict1)
                     else:
                         print(f"[Warning] Model 1 file not found: {resume_model1_path}, using current state.")
@@ -871,7 +833,7 @@ def main():
             # Load best model for this stage
             best_model1_path = os.path.join(args.output_dir, f'best_model1_{session_p1}_{args.wall_type}_{dis_str}.pt')
             if os.path.exists(best_model1_path):
-                model1.load_state_dict(torch.load(best_model1_path, map_location=device))
+                model1.load_state_dict(torch.load(best_model1_path, map_location=device, weights_only=True))
             
             # Record parameter changes
             prev_params = analyze_param_change(model1, prev_params, session_p1)
@@ -911,7 +873,7 @@ def main():
             # Load best model for this stage
             best_model2_path = os.path.join(args.output_dir, f'best_model2_{session_p2}_{args.wall_type}_{dis_str}.pt')
             if os.path.exists(best_model2_path):
-                model2.load_state_dict(torch.load(best_model2_path, map_location=device))
+                model2.load_state_dict(torch.load(best_model2_path, map_location=device, weights_only=True))
             
             final_session_name = session_p2
             
@@ -968,7 +930,7 @@ def main():
         # Load best model1 from Stage 1
         best_model1_path_p1 = os.path.join(args.output_dir, f'best_model1_{session_p1}_{args.wall_type}_{dis_str}.pt')
         if os.path.exists(best_model1_path_p1):
-             model1.load_state_dict(torch.load(best_model1_path_p1, map_location=device))
+             model1.load_state_dict(torch.load(best_model1_path_p1, map_location=device, weights_only=True))
         
         # Stage 2: Fix Beamformer, train RaiNet with localization objective
         session_p2 = "SEQ-P2-FIX_BEAM_LOC"
@@ -990,8 +952,8 @@ def main():
         best_model2_path = os.path.join(args.output_dir, f'best_model2_{final_session_name}_{args.wall_type}_{dis_str}.pt')
 
         if os.path.exists(best_model1_path) and os.path.exists(best_model2_path):
-            model1.load_state_dict(torch.load(best_model1_path, map_location=device))
-            model2.load_state_dict(torch.load(best_model2_path, map_location=device))
+            model1.load_state_dict(torch.load(best_model1_path, map_location=device, weights_only=True))
+            model2.load_state_dict(torch.load(best_model2_path, map_location=device, weights_only=True))
             evaluate_and_plot(model1, model2, test_loader, device, fm_list, pt_scaling_factor, noise_std_dev, dis_max, args, final_session_name)
             
             # [Vis] Plot beam patterns after final training

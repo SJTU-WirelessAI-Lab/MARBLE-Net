@@ -98,15 +98,12 @@ class ISACDatasetSionna(object):
                 traj_data = np.load(traj_path)
                 self.positions = traj_data['position']
 
-        self.h5_file = None
-
     def __len__(self):
         return int(self.num_samples)
 
     def __getitem__(self, idx):
-        if self.h5_file is None:
-            self.h5_file = h5py.File(self.h5_path, 'r')
-        h_matrix = self.h5_file['h_matrices'][idx]
+        with h5py.File(self.h5_path, 'r') as f:
+            h_matrix = f['h_matrices'][idx]
         if h_matrix.ndim == 3:
             h_matrix = h_matrix[0, :, :]
         pos = self.positions[idx]

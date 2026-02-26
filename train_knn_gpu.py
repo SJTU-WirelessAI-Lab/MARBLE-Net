@@ -34,27 +34,8 @@ def calculate_knn_metrics(pos_est, x_gt, y_gt, phi_gt, r_gt):
     r_sq_error = (r_est - r_gt)**2
     return torch.sum(dist_sq_error), torch.sum(phi_sq_error), torch.sum(r_sq_error)
 
-def initial_rainbow_beam_ULA_YOLO(N, d, BW, f_scs, fm_list, phi_1, phi_M):
-    """Compute initial rainbow beam parameters"""
-    device, dtype, c = fm_list.device, fm_list.dtype, 3e8
-    antenna_idx = torch.arange(N, dtype=dtype, device=device) - (N - 1) / 2
-    PS = -fm_list[0] * antenna_idx * d * torch.sin(torch.deg2rad(torch.tensor(phi_1, device=device, dtype=dtype))) / c
-    TTD = -PS / BW - ((fm_list[0] + BW) * antenna_idx * d * torch.sin(torch.deg2rad(torch.tensor(phi_M, device=device, dtype=dtype)))) / (BW * c)
-    PS, TTD = 2.0 * torch.pi * PS, 1e9 * TTD
-    PS, TTD = torch.fmod(PS, 2*torch.pi), torch.fmod(TTD, 1e9/f_scs)
-    return PS, TTD
 
-def compute_uplink_signal_torch(H_oneway, PS_expanded, TTD_expanded, fm_list):
-    """Compute uplink received signal given channel and beam parameters."""
-    device, dtype = H_oneway.device, H_oneway.dtype
-    B, Nt, num_subcarriers = H_oneway.shape
-    ps_b, ttd_b = PS_expanded.unsqueeze(1), TTD_expanded.unsqueeze(1)
-    fm_b = fm_list.view(1, -1, 1)
-    phase = -(ps_b + 2 * np.pi * (fm_b - fm_list[0]) * ttd_b)
-    norm_factor = 1.0 / torch.sqrt(torch.tensor(Nt, dtype=torch.float32, device=device))
-    w_matrix = torch.exp(1j * phase).to(device=device, dtype=dtype) * norm_factor
-    H_transposed = H_oneway.transpose(1, 2)
-    return torch.einsum('bmn,bmn->bm', w_matrix.conj(), H_transposed)
+
 
 # =======================================================
 # 2) Network model definitions
@@ -148,7 +129,7 @@ def main():
     if args.load_weights:
         print(f"Loading beamforming weights from: {args.load_weights}")
         if not os.path.exists(args.load_weights): raise FileNotFoundError(f"Weights not found: {args.load_weights}")
-        weights = torch.load(args.load_weights, map_location=device)
+        weights = torch.load(args.load_weights, map_location=device, weights_only=True)
         PS_init, TTD_init = weights['PS'].to(device), weights['TTD'].to(device)
         print("Weights loaded.")
     else:
